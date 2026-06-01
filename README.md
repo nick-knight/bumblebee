@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/bumblebee.png" alt="Bumblebee" width="200">
+</p>
+
 # Bumblebee
 
 [Bumblebee](https://en.wikipedia.org/wiki/Bumblebee_(Transformers)) is a small Transformer.
