@@ -11,6 +11,7 @@ from datasets.distributed import split_dataset_by_node
 
 from model import ModelConfig, GPTModel
 from dataloader import dataloader, synthetic_dataloader
+from optimizer import OptimConfig, Optimizer
 
 @dataclass
 class TrainConfig:
@@ -25,12 +26,13 @@ class TrainConfig:
     num_train_microbatches: int = 1
     num_valid_microbatches: int = 1
     lr: float = 1e-4
-    torch_compile: bool = True
+    torch_compile: bool = False
 
 def train_step(
         model,
         dataloader,
         optimizer,
+        lr,
         num_microbatches,
         ignore_index,
         is_distributed,
@@ -76,7 +78,8 @@ def train_step(
             if p.grad is not None:
                 p.grad.div_(ntok_accum)
 
-    optimizer.step()
+    # Pass learning rate as a tensor to enable torch.compile when a LR schedule is used.
+    optimizer.step(torch.tensor(lr, dtype=optimizer.optim_dtype, device=optimizer.compute_device))
 
     # Only correct on rank 0:
     return loss_accum.div_(ntok_accum).item()
@@ -119,15 +122,15 @@ def valid_step(
 def run_training(
         model_config,
         train_config,
-        train_ds = None,
-        valid_ds = None,
+        optim_config,
         seed: int = 666,
     ):
     rank, world_size, is_distributed, device = setup_runtime()
     _, print0 = make_print_helpers(rank)
 
-    tc = train_config
     mc = model_config
+    tc = train_config
+    oc = optim_config
 
     # We need to patch up mc.max_seq_len, mc.vocab_size, and mc.dtype.
 
@@ -159,10 +162,13 @@ def run_training(
 
     model = GPTModel(mc).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=tc.lr)
+    optimizer = Optimizer(oc, model)
 
     if tc.torch_compile:
         model = torch.compile(model)
+
+        # This can be made to work; currently hard to debug due to some compiler bugs.
+        # optimizer.step = torch.compile(optimizer.step)
 
     for step in range(tc.train_steps):
 
@@ -170,6 +176,7 @@ def run_training(
             model=model,
             dataloader=train_dataloader,
             optimizer=optimizer,
+            lr=tc.lr,
             num_microbatches=tc.num_train_microbatches,
             ignore_index=tc.ignore_index,
             is_distributed=is_distributed,
@@ -226,14 +233,13 @@ def make_configs():
     # This reference implementation does not actually check environment or command-line. Chat will be happy to add this for you.
     model_config = ModelConfig()
     train_config = TrainConfig()
+    optim_config = OptimConfig()
 
-
-
-    return model_config, train_config
+    return model_config, train_config, optim_config
 
 def main():
-    model_config, train_config = make_configs()
-    run_training(model_config, train_config)
+    model_config, train_config, optim_config = make_configs()
+    run_training(model_config, train_config, optim_config)
 
 if __name__ == '__main__':
     main()
