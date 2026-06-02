@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class OptimConfig:
     adamw_beta1: float = 0.9
-    adamw_beta2: float = 0.999
+    adamw_beta2: float = 0.95
     adamw_eps: float = 1e-8
     adamw_weight_decay: float = 0.01
 
