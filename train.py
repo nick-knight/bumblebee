@@ -143,7 +143,7 @@ def run_training(
     # Make model fprop/bprop use BF16 on CUDA/MPS, and FP32 otherwise:
     if device.type == 'cuda' or device.type == 'mps':
         mc.dtype = torch.bfloat16
-    else
+    else:
         mc.dtype = torch.float32
 
     if tc.dataset_name == 'synthetic':
