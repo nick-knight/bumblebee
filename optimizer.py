@@ -33,7 +33,6 @@ class Optimizer:
             self.adamw_m[name] = torch.zeros(param.view(-1).shape, dtype=self.optim_dtype, device=self.compute_device)
             self.adamw_v[name] = torch.zeros(param.view(-1).shape, dtype=self.optim_dtype, device=self.compute_device)
 
-
         # Shared step counter for bias correction. Stored as a 0-d float
         # tensor (rather than a Python int) so that incrementing it inside
         # the compiled `step` doesn't force dynamo to recompile on the new

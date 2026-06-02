@@ -26,7 +26,7 @@ class TrainConfig:
     num_train_microbatches: int = 1
     num_valid_microbatches: int = 1
     lr: float = 1e-4
-    torch_compile: bool = False
+    torch_compile: bool = True
 
 def train_step(
         model,
@@ -133,7 +133,6 @@ def run_training(
     oc = optim_config
 
     # We need to patch up mc.max_seq_len, mc.vocab_size, and mc.dtype.
-
     mc.max_seq_len = tc.seq_len
 
     if tc.dataset_name == 'synthetic':
@@ -141,7 +140,11 @@ def run_training(
     else:
         mc.vocab_size = tiktoken.encoding_for_model(tc.tokenizer_model).n_vocab
 
-    mc.dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
+    # Make model fprop/bprop use BF16 on CUDA/MPS, and FP32 otherwise:
+    if device.type == 'cuda' or device.type == 'mps':
+        mc.dtype = torch.bfloat16
+    else
+        mc.dtype = torch.float32
 
     if tc.dataset_name == 'synthetic':
         train_dataloader = synthetic_dataloader(mc.vocab_size, tc.train_local_microbatch_size, tc.seq_len, device, seed=seed + rank)
@@ -164,10 +167,10 @@ def run_training(
 
     optimizer = Optimizer(oc, model)
 
-    if tc.torch_compile:
+    if tc.torch_compile and (device.type == 'cuda' or device.type == 'mps'):
         model = torch.compile(model)
 
-        # This can be made to work; currently hard to debug due to some compiler bugs.
+        # This works, but is fragile, and has dubious speedups. Leaving it disabled.
         # optimizer.step = torch.compile(optimizer.step)
 
     for step in range(tc.train_steps):
@@ -210,6 +213,8 @@ def setup_runtime():
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device = torch.device('cuda', local_rank)
         torch.cuda.set_device(device)
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
     else:
         device = torch.device('cpu')
 
