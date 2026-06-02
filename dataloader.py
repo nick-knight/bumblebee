@@ -1,5 +1,4 @@
 import torch
-import os
 
 def dataloader(dataset, tokenizer, batch_size, seq_len, device):
 

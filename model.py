@@ -68,12 +68,12 @@ class GPTModel(torch.nn.Module):
 
         X = self.W_E[:, inputs]
         X = torch.einsum('DBS->BSD', X)
-        for l in range(self.mc.num_layers):
+        for layer in range(self.mc.num_layers):
             Z = torch.nn.functional.rms_norm(X, (X.size(-1),))
 
-            Q = torch.einsum('HdD,BSD->HBSd', self.W_Q[l, ...], Z)
-            K = torch.einsum('HdD,BSD->HBSd', self.W_K[l, ...], Z)
-            V = torch.einsum('HdD,BSD->HBSd', self.W_V[l, ...], Z)
+            Q = torch.einsum('HdD,BSD->HBSd', self.W_Q[layer, ...], Z)
+            K = torch.einsum('HdD,BSD->HBSd', self.W_K[layer, ...], Z)
+            V = torch.einsum('HdD,BSD->HBSd', self.W_V[layer, ...], Z)
 
             Z = torch.einsum('HBTd,HBSd->HBTS', K.repeat_interleave(self.mc.num_heads // self.mc.num_query_groups, dim=0), Q)
             Z = Z.div(math.sqrt(self.mc.qk_dim))
@@ -81,14 +81,14 @@ class GPTModel(torch.nn.Module):
             Z = torch.nn.functional.softmax(Z, dim=2)
             Z = torch.einsum('HBTd,HBTS->HBSd', V.repeat_interleave(self.mc.num_heads // self.mc.num_query_groups, dim=0), Z)
 
-            Z = torch.einsum('HDd,HBSd->BSD', self.W_O[l, ...], Z)
+            Z = torch.einsum('HDd,HBSd->BSD', self.W_O[layer, ...], Z)
 
             X = X + Z
             Z = torch.nn.functional.rms_norm(X, (X.size(-1),))
-            Z = torch.einsum('QD,BSD->BSQ', self.W_FC1[l, ...], Z)
+            Z = torch.einsum('QD,BSD->BSQ', self.W_FC1[layer, ...], Z)
             Z = torch.nn.functional.relu(Z).square()
 
-            Z = torch.einsum('DQ,BSQ->BSD', self.W_FC2[l, ...], Z)
+            Z = torch.einsum('DQ,BSQ->BSD', self.W_FC2[layer, ...], Z)
             X = X + Z
         X = torch.einsum('VD,BSD->BSV', self.W_U, X)
 
