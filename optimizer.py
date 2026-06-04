@@ -33,18 +33,12 @@ class Optimizer:
             self.adamw_m[name] = torch.zeros(param.view(-1).shape, dtype=self.optim_dtype, device=self.compute_device)
             self.adamw_v[name] = torch.zeros(param.view(-1).shape, dtype=self.optim_dtype, device=self.compute_device)
 
-        # Shared step counter for bias correction. Stored as a 0-d float
-        # tensor (rather than a Python int) so that incrementing it inside
-        # the compiled `step` doesn't force dynamo to recompile on the new
-        # value, and so that `beta ** step` stays tensor.
-        self.adamw_step = torch.zeros((), dtype=self.optim_dtype, device=self.compute_device)
+        # Specialize step() for first step. (Equivalent to "bias correction").
+        # Stored as a 0-d tensor to avoid compiling two separate functions.
+        self.adamw_first_step = torch.ones((), dtype=torch.bool, device=self.compute_device)
 
     @torch.no_grad()
     def step(self, lr):
-
-        # AdamW's bias correction uses a 1-based step count. Increment once
-        # per `step()` call so all AdamW invocations below see the same value.
-        self.adamw_step.add_(1)
 
         for name, param in self.model.named_parameters():
             if param.grad is not None:
@@ -58,22 +52,21 @@ class Optimizer:
                 )
                 x.copy_(x_new.to(self.model_dtype))
 
+        self.adamw_first_step.fill_(False)
+
     def _adamw_step(self, x, g, param_name, lr):
         beta1 = self.adamw_beta1
         beta2 = self.adamw_beta2
 
-        m = beta1 * self.adamw_m[param_name] + (1 - beta1) * g
-        v = beta2 * self.adamw_v[param_name] + (1 - beta2) * g.square()
-
-        # step counter was updated above
-        bc1 = 1 - beta1 ** self.adamw_step
-        bc2 = 1 - beta2 ** self.adamw_step
-
-        m_hat = m / bc1
-        v_hat = v / bc2
+        if self.adamw_first_step:
+            m = g
+            v = g.square()
+        else:
+            m = beta1 * self.adamw_m[param_name] + (1 - beta1) * g
+            v = beta2 * self.adamw_v[param_name] + (1 - beta2) * g.square()
 
         x = x * (1 - lr * self.adamw_weight_decay)
-        x = x - lr * m_hat / (v_hat.sqrt() + self.adamw_eps)
+        x = x - lr * m / (v.sqrt() + self.adamw_eps)
 
         self.adamw_m[param_name].copy_(m)
         self.adamw_v[param_name].copy_(v)
