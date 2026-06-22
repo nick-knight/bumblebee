@@ -37,10 +37,7 @@ class GPTModel(torch.nn.Module):
 
         super().__init__()
 
-        # Dimensions are chosen so that the last corresponds to the matmul inner dimension.
-        self.W_FC1 = torch.nn.Parameter(torch.empty((self.num_layers, self.mlp_dim, self.hidden_dim), dtype=self.wide_dtype))
-        self.W_FC2 = torch.nn.Parameter(torch.empty((self.num_layers, self.hidden_dim, self.mlp_dim), dtype=self.wide_dtype))
-
+        # Dimensions are ordered so that the last corresponds to the matmul inner dimension.
         self.W_E   = torch.nn.Parameter(torch.empty((self.hidden_dim, self.vocab_size), dtype=self.wide_dtype))
         self.W_U   = torch.nn.Parameter(torch.empty((self.vocab_size, self.hidden_dim), dtype=self.wide_dtype))
 
@@ -49,22 +46,26 @@ class GPTModel(torch.nn.Module):
         self.W_V   = torch.nn.Parameter(torch.empty((self.num_layers, self.num_query_groups, self.v_dim, self.hidden_dim), dtype=self.wide_dtype))
         self.W_O   = torch.nn.Parameter(torch.empty((self.num_layers, self.num_heads, self.hidden_dim, self.v_dim), dtype=self.wide_dtype))
 
-        # For a linear operator from R^N to R^M, pick matrix entries as i.i.d. samples from Uniform[-1/sqrt(N), 1/sqrt(N)].
+        self.W_FC1 = torch.nn.Parameter(torch.empty((self.num_layers, self.mlp_dim, self.hidden_dim), dtype=self.wide_dtype))
+        self.W_FC2 = torch.nn.Parameter(torch.empty((self.num_layers, self.hidden_dim, self.mlp_dim), dtype=self.wide_dtype))
+
+        # GPT-2-style initialization: all weights ~ Normal(0, 0.02), with W_FC2 and W_O additionally scaled by 1/sqrt(2 * num_layers).
         @torch.no_grad()
-        def init_linear (W, N):
-            std = 1. / math.sqrt(N)
-            W.uniform_(-std, std)
+        def init_normal (W, std):
+            W.normal_(mean=0., std=std)
 
-        init_linear(self.W_E,   self.W_E.shape[-1])
-        init_linear(self.W_U,   self.W_U.shape[-1])
+        residual_scale = 1. / math.sqrt(2 * self.num_layers)
 
-        init_linear(self.W_FC1, self.W_FC1.shape[-1])
-        init_linear(self.W_FC2, self.W_FC2.shape[-1])
+        init_normal(self.W_E,   0.02)
+        init_normal(self.W_U,   0.02)
 
-        init_linear(self.W_Q,   self.W_Q.shape[-1])
-        init_linear(self.W_K,   self.W_K.shape[-1])
-        init_linear(self.W_V,   self.W_V.shape[-1])
-        init_linear(self.W_O,   self.W_O.shape[-1])
+        init_normal(self.W_Q,   0.02)
+        init_normal(self.W_K,   0.02)
+        init_normal(self.W_V,   0.02)
+        init_normal(self.W_O,   0.02 * residual_scale)
+
+        init_normal(self.W_FC1, 0.02)
+        init_normal(self.W_FC2, 0.02 * residual_scale)
 
         tok_idxs = torch.arange(self.max_seq_len)
         # attn_mask is n_keys-by-n_queries, with True => ignore entry.
