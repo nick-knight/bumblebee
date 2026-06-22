@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class OptimConfig:
     max_lr: float = 1e-4
-    max_wd: float = 0.01 # divide by
+    max_wd: float = 0.01 # NB: multiply by max_lr to match PyTorch's parameterization. (See notes below.)
     adamw_beta1: float = 0.9
     adamw_beta2: float = 0.95
     adamw_eps: float = 1e-8
