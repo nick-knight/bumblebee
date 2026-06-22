@@ -25,24 +25,27 @@ class TrainConfig:
     valid_interval: int = 10
     num_train_microbatches: int = 1
     num_valid_microbatches: int = 1
-    lr: float = 1e-4
     torch_compile: bool = True
 
 def train_step(
         model,
         dataloader,
         optimizer,
-        lr,
+        step,
         num_microbatches,
         ignore_index,
-        is_distributed,
-        device
+        is_distributed
     ):
 
     model.train()
     model.zero_grad(set_to_none=True)
 
-    loss_accum = torch.zeros((), dtype=torch.float32, device=device)
+    device = next(model.parameters()).device
+
+    loss_dtype = torch.float32
+    loss_accum_dtype = torch.float64 if device.type != 'mps' else torch.float32 # MPS doesn't support FP64 yet.
+
+    loss_accum = torch.zeros((), dtype=loss_accum_dtype, device=device)
     ntok_accum = torch.zeros((), dtype=torch.int64, device=device)
 
     for _ in range(num_microbatches):
@@ -51,13 +54,13 @@ def train_step(
         targets = local_microbatch.roll(-1, 1)
         targets[:, -1] = ignore_index
         loss = torch.nn.functional.cross_entropy(
-            outputs.to(torch.float32).view(-1, outputs.size(-1)),
+            outputs.to(loss_dtype).view(-1, outputs.size(-1)),
             targets.view(-1),
             ignore_index=ignore_index,
             reduction='sum',
         )
         del outputs   # Hack to enable Python garbage collector to reclaim this memory during backward().
-        loss_accum += loss
+        loss_accum += loss.detach().to(loss_accum_dtype)
         loss.backward()
         ntok_accum += targets.size(0) * (targets.size(1) - 1)
 
@@ -78,8 +81,8 @@ def train_step(
             if p.grad is not None:
                 p.grad.div_(ntok_accum)
 
-    # Pass learning rate as a tensor to enable torch.compile when a LR schedule is used.
-    optimizer.step(torch.tensor(lr, dtype=optimizer.optim_dtype, device=optimizer.compute_device))
+    # Pass step as a tensor to enable torch.compile.
+    optimizer.step(torch.tensor(step, dtype=torch.int64, device=device))
 
     # Only correct on rank 0:
     return loss_accum.div_(ntok_accum).item()
@@ -89,13 +92,17 @@ def valid_step(
     dataloader,
     num_microbatches,
     ignore_index,
-    is_distributed,
-    device,
+    is_distributed
 ):
 
     model.eval()
 
-    loss_accum = torch.zeros((), dtype=torch.float32, device=device)
+    device = next(model.parameters()).device
+
+    loss_dtype = torch.float32
+    loss_accum_dtype = torch.float64 if device.type != 'mps' else torch.float32 # MPS doesn't support FP64 yet.
+
+    loss_accum = torch.zeros((), dtype=loss_accum_dtype, device=device)
     ntok_accum = torch.zeros((), dtype=torch.int64, device=device)
 
     for _ in range(num_microbatches):
@@ -105,11 +112,11 @@ def valid_step(
         targets = local_microbatch.roll(-1, 1)
         targets[:, -1] = ignore_index
         loss_accum += torch.nn.functional.cross_entropy(
-            outputs.to(torch.float32).view(-1, outputs.size(-1)),
+            outputs.to(loss_dtype).view(-1, outputs.size(-1)),
             targets.view(-1),
             ignore_index=ignore_index,
             reduction='sum',
-        )
+        ).to(loss_accum_dtype)
         ntok_accum += targets.size(0) * (targets.size(1) - 1)
 
     if is_distributed:
@@ -142,9 +149,9 @@ def run_training(
 
     # Make model fprop/bprop use BF16 on CUDA/MPS, and FP32 otherwise:
     if device.type == 'cuda' or device.type == 'mps':
-        mc.dtype = torch.bfloat16
+        mc.narrow_dtype = torch.bfloat16
     else:
-        mc.dtype = torch.float32
+        mc.narrow_dtype = torch.float32
 
     if tc.dataset_name == 'synthetic':
         train_dataloader = synthetic_dataloader(mc.vocab_size, tc.train_local_microbatch_size, tc.seq_len, device, seed=seed + rank)
@@ -165,10 +172,13 @@ def run_training(
 
     model = GPTModel(mc).to(device)
 
+    # Ensure the GPTModel has been instantiated and moved to device before instantiating the Optimizer
     optimizer = Optimizer(oc, model)
 
-    if tc.torch_compile and (device.type == 'cuda' or device.type == 'mps'):
-        model = torch.compile(model)
+    if tc.torch_compile:
+        # The 'cpu' backend seems to have a lot of issues.
+        if device.type == 'cuda' or device.type == 'mps':
+            model = torch.compile(model)
 
         # This works, but is fragile, and has dubious speedups. Leaving it disabled.
         # optimizer.step = torch.compile(optimizer.step)
@@ -179,11 +189,10 @@ def run_training(
             model=model,
             dataloader=train_dataloader,
             optimizer=optimizer,
-            lr=tc.lr,
+            step=step,
             num_microbatches=tc.num_train_microbatches,
             ignore_index=tc.ignore_index,
-            is_distributed=is_distributed,
-            device=device
+            is_distributed=is_distributed
         )
 
         print0(f"After training step {step}, training loss is {loss} nats.")
@@ -194,8 +203,7 @@ def run_training(
                 dataloader=valid_dataloader,
                 num_microbatches=tc.num_valid_microbatches,
                 ignore_index=tc.ignore_index,
-                is_distributed=is_distributed,
-                device=device
+                is_distributed=is_distributed
             )
 
             print0(f"After training step {step}, validation loss is {loss} nats.")
