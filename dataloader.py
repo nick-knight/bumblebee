@@ -1,4 +1,21 @@
+from pathlib import Path
+
 import torch
+import tiktoken
+
+
+class ByteTokenizer:
+
+    n_vocab = 256
+
+    def encode_ordinary(self, text):
+        return list(text.encode('utf-8'))
+
+
+def get_tokenizer(name):
+    if name == 'byte':
+        return ByteTokenizer()
+    return tiktoken.encoding_for_model(name)
 
 def dataloader(dataset, tokenizer, batch_size, seq_len, device):
 
@@ -45,3 +62,26 @@ def synthetic_dataloader(vocab_size, batch_size, seq_len, device, seed):
             device=device,
             generator=generator,
         )
+
+def text_dataloader(path, tokenizer, batch_size, seq_len, device, seed, split):
+    text = Path(path).read_text(encoding='utf-8')
+    tokens = torch.tensor(tokenizer.encode_ordinary(text), dtype=torch.int64)
+    split_index = int(0.9 * tokens.numel())
+    tokens = tokens[:split_index] if split == 'train' else tokens[split_index:]
+    if tokens.numel() < seq_len:
+        raise ValueError(
+            f"The {split} split contains {tokens.numel()} tokens, fewer than seq_len={seq_len}."
+        )
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    offsets = torch.arange(seq_len)
+
+    while True:
+        starts = torch.randint(
+            low=0,
+            high=tokens.numel() - seq_len + 1,
+            size=(batch_size,),
+            generator=generator,
+        )
+        yield tokens[starts[:, None] + offsets].to(device)

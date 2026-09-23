@@ -22,6 +22,41 @@
 
 The first time you run `train.py`, it will download and preprocess a very large Hugging Face dataset into `$HF_HOME`. This may take hours.
 
+### Local toy training
+
+The `modelopt` branch can train from a local UTF-8 text file without loading Hugging Face Datasets.
+It uses the first 90% of tokens for training and the remainder for validation. For example:
+
+```
+python train.py \
+    --dataset-name text \
+    --dataset-path /path/to/corpus.txt \
+    --tokenizer-model byte \
+    --train-steps 1000 \
+    --log-interval 50 \
+    --valid-interval 50 \
+    --seq-len 128 \
+    --num-layers 4 \
+    --hidden-dim 256 \
+    --num-heads 4 \
+    --num-query-groups 4 \
+    --qk-dim 64 \
+    --v-dim 64 \
+    --mlp-dim 1024 \
+    --max-wd 0 \
+    --checkpoint-path checkpoints/parent.pt \
+    --checkpoint-interval 100
+```
+
+Resume training with the same model and training arguments plus
+`--resume-from checkpoints/parent.pt`. Checkpoints contain the model configuration, training
+configuration, model weights, optimizer state, and next training step. Data-loader position is not
+captured, so resumed runs are not bitwise identical to uninterrupted runs.
+
+The model also exposes `set_key_value_transforms()`. ModelOpt experiments can use it to install
+same-shaped calibration or projection modules immediately after each layer computes its keys and
+values. Identity modules are installed by default, preserving the original model behavior.
+
 ## Cluster usage
 
 See `interactive-dp8.sh` and `batch-dp32.sh`.

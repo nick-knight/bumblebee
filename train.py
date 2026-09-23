@@ -1,31 +1,34 @@
+import argparse
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
-import tiktoken
-
-from datasets import load_dataset
-from datasets.distributed import split_dataset_by_node
-
+from checkpoint import load_checkpoint, save_checkpoint
+from dataloader import dataloader, get_tokenizer, synthetic_dataloader, text_dataloader
 from model import ModelConfig, GPTModel
-from dataloader import dataloader, synthetic_dataloader
 from optimizer import OptimConfig, Optimizer
 
 @dataclass
 class TrainConfig:
     dataset_name: str = 'fineweb'
+    dataset_path: str | None = None
     tokenizer_model: str = 'gpt2'
     train_local_microbatch_size: int = 8
     valid_local_microbatch_size: int = 8
     seq_len: int = 512
     ignore_index: int = -1
     train_steps: int = 1000
+    log_interval: int = 1
     valid_interval: int = 10
     num_train_microbatches: int = 1
     num_valid_microbatches: int = 1
     torch_compile: bool = True
+    checkpoint_path: str | None = None
+    checkpoint_interval: int | None = None
+    resume_from: str | None = None
 
 def train_step(
         model,
@@ -139,13 +142,22 @@ def run_training(
     tc = train_config
     oc = optim_config
 
+    if tc.log_interval < 1:
+        raise ValueError("log_interval must be positive")
+    if tc.checkpoint_interval is not None and tc.checkpoint_interval < 1:
+        raise ValueError("checkpoint_interval must be positive")
+    if tc.dataset_name == 'text' and tc.dataset_path is not None:
+        tc.dataset_path = str(Path(tc.dataset_path).expanduser().resolve())
+
     # We need to patch up mc.max_seq_len, mc.vocab_size, and mc.dtype.
     mc.max_seq_len = tc.seq_len
 
     if tc.dataset_name == 'synthetic':
         mc.vocab_size = 512 # small value for smoke-testing
+    elif tc.dataset_name in ('fineweb', 'text'):
+        mc.vocab_size = get_tokenizer(tc.tokenizer_model).n_vocab
     else:
-        mc.vocab_size = tiktoken.encoding_for_model(tc.tokenizer_model).n_vocab
+        raise ValueError(f"Unsupported dataset_name: {tc.dataset_name}")
 
     # Make model fprop/bprop use BF16 on CUDA/MPS, and FP32 otherwise:
     if device.type == 'cuda' or device.type == 'mps':
@@ -156,7 +168,33 @@ def run_training(
     if tc.dataset_name == 'synthetic':
         train_dataloader = synthetic_dataloader(mc.vocab_size, tc.train_local_microbatch_size, tc.seq_len, device, seed=seed + rank)
         valid_dataloader = synthetic_dataloader(mc.vocab_size, tc.valid_local_microbatch_size, tc.seq_len, device, seed=seed + world_size + rank)
+    elif tc.dataset_name == 'text':
+        if tc.dataset_path is None:
+            raise ValueError("dataset_path is required when dataset_name='text'")
+        tokenizer = get_tokenizer(tc.tokenizer_model)
+        train_dataloader = text_dataloader(
+            tc.dataset_path,
+            tokenizer,
+            tc.train_local_microbatch_size,
+            tc.seq_len,
+            device,
+            seed + rank,
+            'train',
+        )
+        valid_dataloader = text_dataloader(
+            tc.dataset_path,
+            tokenizer,
+            tc.valid_local_microbatch_size,
+            tc.seq_len,
+            device,
+            seed + world_size + rank,
+            'valid',
+        )
     elif tc.dataset_name == 'fineweb':
+        # Keep Hugging Face dependencies optional for synthetic and local-text experiments.
+        from datasets import load_dataset
+        from datasets.distributed import split_dataset_by_node
+
         # For sample-10BT, Hugging Face Hub and Datasets consume 76 GiB on my setup.
         assert os.getenv('HF_HOME'), "Please set HF_HOME to a place you're OK with Hugging Face caching a bunch of stuff."
         ds = load_dataset('HuggingFaceFW/fineweb', name='sample-10BT', split='train', streaming=False)
@@ -164,7 +202,7 @@ def run_training(
         if is_distributed:
             ds = split_dataset_by_node(ds, rank=rank, world_size=world_size)
         ds = ds.train_test_split(test_size=0.1, shuffle=False)
-        tokenizer = tiktoken.get_encoding(tc.tokenizer_model)
+        tokenizer = get_tokenizer(tc.tokenizer_model)
         train_dataloader = dataloader(ds['train'], tokenizer, tc.train_local_microbatch_size, tc.seq_len, device)
         valid_dataloader = dataloader(ds['test'],  tokenizer, tc.valid_local_microbatch_size, tc.seq_len, device)
 
@@ -175,6 +213,13 @@ def run_training(
     # Ensure the GPTModel has been instantiated and moved to device before instantiating the Optimizer
     optimizer = Optimizer(oc, model)
 
+    start_step = 0
+    if tc.resume_from is not None:
+        checkpoint = load_checkpoint(tc.resume_from, model=model, optimizer=optimizer, map_location=device)
+        start_step = checkpoint['next_step']
+
+    checkpoint_model = model
+
     if tc.torch_compile:
         # The 'cpu' backend seems to have a lot of issues.
         if device.type == 'cuda' or device.type == 'mps':
@@ -183,7 +228,7 @@ def run_training(
         # This works, but is fragile, and has dubious speedups. Leaving it disabled.
         # optimizer.step = torch.compile(optimizer.step)
 
-    for step in range(tc.train_steps):
+    for step in range(start_step, tc.train_steps):
 
         loss = train_step(
             model=model,
@@ -195,7 +240,8 @@ def run_training(
             is_distributed=is_distributed
         )
 
-        print0(f"After training step {step}, training loss is {loss} nats.")
+        if step % tc.log_interval == 0:
+            print0(f"After training step {step}, training loss is {loss} nats.")
 
         if step % tc.valid_interval == 0:
             loss = valid_step(
@@ -207,6 +253,33 @@ def run_training(
             )
 
             print0(f"After training step {step}, validation loss is {loss} nats.")
+
+        if (
+            rank == 0
+            and tc.checkpoint_path is not None
+            and tc.checkpoint_interval is not None
+            and (step + 1) % tc.checkpoint_interval == 0
+        ):
+            save_checkpoint(
+                tc.checkpoint_path,
+                model=checkpoint_model,
+                optimizer=optimizer,
+                next_step=step + 1,
+                model_config=mc,
+                train_config=tc,
+                optim_config=oc,
+            )
+
+    if rank == 0 and tc.checkpoint_path is not None:
+        save_checkpoint(
+            tc.checkpoint_path,
+            model=checkpoint_model,
+            optimizer=optimizer,
+            next_step=tc.train_steps,
+            model_config=mc,
+            train_config=tc,
+            optim_config=oc,
+        )
 
     if is_distributed:
         dist.barrier()
@@ -243,15 +316,75 @@ def make_print_helpers(rank):
     return print_n, print_0
 
 def make_configs():
-    # This reference implementation does not actually check environment or command-line. Chat will be happy to add this for you.
     model_config = ModelConfig()
     train_config = TrainConfig()
     optim_config = OptimConfig()
 
     return model_config, train_config, optim_config
 
-def main():
+def parse_configs():
     model_config, train_config, optim_config = make_configs()
+    parser = argparse.ArgumentParser(description='Train the Bumblebee Transformer.')
+    parser.add_argument('--dataset-name', choices=('fineweb', 'synthetic', 'text'))
+    parser.add_argument('--dataset-path')
+    parser.add_argument('--tokenizer-model')
+    parser.add_argument('--train-steps', type=int)
+    parser.add_argument('--log-interval', type=int)
+    parser.add_argument('--valid-interval', type=int)
+    parser.add_argument('--seq-len', type=int)
+    parser.add_argument('--train-local-microbatch-size', type=int)
+    parser.add_argument('--valid-local-microbatch-size', type=int)
+    parser.add_argument('--checkpoint-path')
+    parser.add_argument('--checkpoint-interval', type=int)
+    parser.add_argument('--resume-from')
+    parser.add_argument('--torch-compile', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--num-layers', type=int)
+    parser.add_argument('--hidden-dim', type=int)
+    parser.add_argument('--num-heads', type=int)
+    parser.add_argument('--num-query-groups', type=int)
+    parser.add_argument('--qk-dim', type=int)
+    parser.add_argument('--v-dim', type=int)
+    parser.add_argument('--mlp-dim', type=int)
+    parser.add_argument('--max-lr', type=float)
+    parser.add_argument('--max-wd', type=float)
+    args = vars(parser.parse_args())
+
+    for name in (
+        'dataset_name',
+        'dataset_path',
+        'tokenizer_model',
+        'train_steps',
+        'log_interval',
+        'valid_interval',
+        'seq_len',
+        'train_local_microbatch_size',
+        'valid_local_microbatch_size',
+        'checkpoint_path',
+        'checkpoint_interval',
+        'resume_from',
+        'torch_compile',
+    ):
+        if args[name] is not None:
+            setattr(train_config, name, args[name])
+    for name in (
+        'num_layers',
+        'hidden_dim',
+        'num_heads',
+        'num_query_groups',
+        'qk_dim',
+        'v_dim',
+        'mlp_dim',
+    ):
+        if args[name] is not None:
+            setattr(model_config, name, args[name])
+    for name in ('max_lr', 'max_wd'):
+        if args[name] is not None:
+            setattr(optim_config, name, args[name])
+
+    return model_config, train_config, optim_config
+
+def main():
+    model_config, train_config, optim_config = parse_configs()
     run_training(model_config, train_config, optim_config)
 
 if __name__ == '__main__':

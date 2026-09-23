@@ -62,3 +62,29 @@ class Optimizer:
         x.copy_(x_new)
         m.copy_(m_new)
         v.copy_(v_new)
+
+    def state_dict(self):
+        return {
+            'adamw_m': self.adamw_m,
+            'adamw_v': self.adamw_v,
+        }
+
+    def load_state_dict(self, state_dict):
+        expected_names = set(dict(self.model.named_parameters()))
+        for state_name in ('adamw_m', 'adamw_v'):
+            saved = state_dict[state_name]
+            if set(saved) != expected_names:
+                missing = expected_names - set(saved)
+                unexpected = set(saved) - expected_names
+                raise ValueError(
+                    f"Invalid optimizer state {state_name}: missing={sorted(missing)}, "
+                    f"unexpected={sorted(unexpected)}"
+                )
+            current = getattr(self, state_name)
+            for name, value in saved.items():
+                if value.shape != current[name].shape:
+                    raise ValueError(
+                        f"Invalid optimizer state shape for {name}: "
+                        f"expected {tuple(current[name].shape)}, got {tuple(value.shape)}"
+                    )
+                current[name].copy_(value)
