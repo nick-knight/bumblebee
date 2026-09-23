@@ -31,7 +31,10 @@ It uses the first 90% of tokens for training and the remainder for validation. F
 python train.py \
     --dataset-name text \
     --dataset-path /path/to/corpus.txt \
+    --tokenizer-model byte \
     --train-steps 1000 \
+    --log-interval 50 \
+    --valid-interval 50 \
     --seq-len 128 \
     --num-layers 4 \
     --hidden-dim 256 \
@@ -40,6 +43,7 @@ python train.py \
     --qk-dim 64 \
     --v-dim 64 \
     --mlp-dim 1024 \
+    --max-wd 0 \
     --checkpoint-path checkpoints/parent.pt \
     --checkpoint-interval 100
 ```

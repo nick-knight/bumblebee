@@ -1,6 +1,21 @@
 from pathlib import Path
 
 import torch
+import tiktoken
+
+
+class ByteTokenizer:
+
+    n_vocab = 256
+
+    def encode_ordinary(self, text):
+        return list(text.encode('utf-8'))
+
+
+def get_tokenizer(name):
+    if name == 'byte':
+        return ByteTokenizer()
+    return tiktoken.encoding_for_model(name)
 
 def dataloader(dataset, tokenizer, batch_size, seq_len, device):
 

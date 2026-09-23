@@ -1,15 +1,14 @@
 import argparse
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
-import tiktoken
-
 from checkpoint import load_checkpoint, save_checkpoint
+from dataloader import dataloader, get_tokenizer, synthetic_dataloader, text_dataloader
 from model import ModelConfig, GPTModel
-from dataloader import dataloader, synthetic_dataloader, text_dataloader
 from optimizer import OptimConfig, Optimizer
 
 @dataclass
@@ -22,6 +21,7 @@ class TrainConfig:
     seq_len: int = 512
     ignore_index: int = -1
     train_steps: int = 1000
+    log_interval: int = 1
     valid_interval: int = 10
     num_train_microbatches: int = 1
     num_valid_microbatches: int = 1
@@ -142,8 +142,12 @@ def run_training(
     tc = train_config
     oc = optim_config
 
+    if tc.log_interval < 1:
+        raise ValueError("log_interval must be positive")
     if tc.checkpoint_interval is not None and tc.checkpoint_interval < 1:
         raise ValueError("checkpoint_interval must be positive")
+    if tc.dataset_name == 'text' and tc.dataset_path is not None:
+        tc.dataset_path = str(Path(tc.dataset_path).expanduser().resolve())
 
     # We need to patch up mc.max_seq_len, mc.vocab_size, and mc.dtype.
     mc.max_seq_len = tc.seq_len
@@ -151,7 +155,7 @@ def run_training(
     if tc.dataset_name == 'synthetic':
         mc.vocab_size = 512 # small value for smoke-testing
     elif tc.dataset_name in ('fineweb', 'text'):
-        mc.vocab_size = tiktoken.encoding_for_model(tc.tokenizer_model).n_vocab
+        mc.vocab_size = get_tokenizer(tc.tokenizer_model).n_vocab
     else:
         raise ValueError(f"Unsupported dataset_name: {tc.dataset_name}")
 
@@ -167,7 +171,7 @@ def run_training(
     elif tc.dataset_name == 'text':
         if tc.dataset_path is None:
             raise ValueError("dataset_path is required when dataset_name='text'")
-        tokenizer = tiktoken.encoding_for_model(tc.tokenizer_model)
+        tokenizer = get_tokenizer(tc.tokenizer_model)
         train_dataloader = text_dataloader(
             tc.dataset_path,
             tokenizer,
@@ -198,7 +202,7 @@ def run_training(
         if is_distributed:
             ds = split_dataset_by_node(ds, rank=rank, world_size=world_size)
         ds = ds.train_test_split(test_size=0.1, shuffle=False)
-        tokenizer = tiktoken.get_encoding(tc.tokenizer_model)
+        tokenizer = get_tokenizer(tc.tokenizer_model)
         train_dataloader = dataloader(ds['train'], tokenizer, tc.train_local_microbatch_size, tc.seq_len, device)
         valid_dataloader = dataloader(ds['test'],  tokenizer, tc.valid_local_microbatch_size, tc.seq_len, device)
 
@@ -236,7 +240,8 @@ def run_training(
             is_distributed=is_distributed
         )
 
-        print0(f"After training step {step}, training loss is {loss} nats.")
+        if step % tc.log_interval == 0:
+            print0(f"After training step {step}, training loss is {loss} nats.")
 
         if step % tc.valid_interval == 0:
             loss = valid_step(
@@ -324,6 +329,8 @@ def parse_configs():
     parser.add_argument('--dataset-path')
     parser.add_argument('--tokenizer-model')
     parser.add_argument('--train-steps', type=int)
+    parser.add_argument('--log-interval', type=int)
+    parser.add_argument('--valid-interval', type=int)
     parser.add_argument('--seq-len', type=int)
     parser.add_argument('--train-local-microbatch-size', type=int)
     parser.add_argument('--valid-local-microbatch-size', type=int)
@@ -338,6 +345,8 @@ def parse_configs():
     parser.add_argument('--qk-dim', type=int)
     parser.add_argument('--v-dim', type=int)
     parser.add_argument('--mlp-dim', type=int)
+    parser.add_argument('--max-lr', type=float)
+    parser.add_argument('--max-wd', type=float)
     args = vars(parser.parse_args())
 
     for name in (
@@ -345,6 +354,8 @@ def parse_configs():
         'dataset_path',
         'tokenizer_model',
         'train_steps',
+        'log_interval',
+        'valid_interval',
         'seq_len',
         'train_local_microbatch_size',
         'valid_local_microbatch_size',
@@ -366,6 +377,9 @@ def parse_configs():
     ):
         if args[name] is not None:
             setattr(model_config, name, args[name])
+    for name in ('max_lr', 'max_wd'):
+        if args[name] is not None:
+            setattr(optim_config, name, args[name])
 
     return model_config, train_config, optim_config
 

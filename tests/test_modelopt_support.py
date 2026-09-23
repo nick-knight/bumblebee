@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from checkpoint import load_checkpoint, save_checkpoint
-from dataloader import text_dataloader
+from dataloader import ByteTokenizer, text_dataloader
 from model import GPTModel, ModelConfig
 from optimizer import OptimConfig, Optimizer
 from train import TrainConfig
@@ -44,6 +44,12 @@ class CharacterTokenizer:
 
 
 class ModelOptSupportTest(unittest.TestCase):
+
+    def test_byte_tokenizer_uses_a_compact_fixed_vocabulary(self):
+        tokenizer = ByteTokenizer()
+
+        self.assertEqual(tokenizer.n_vocab, 256)
+        self.assertEqual(tokenizer.encode_ordinary('Aé'), list('Aé'.encode('utf-8')))
 
     def test_local_text_dataloader_produces_deterministic_batches(self):
         with tempfile.TemporaryDirectory() as directory:
