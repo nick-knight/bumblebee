@@ -49,6 +49,11 @@ class GPTModel(torch.nn.Module):
         self.W_FC1 = torch.nn.Parameter(torch.empty((self.num_layers, self.mlp_dim, self.hidden_dim), dtype=self.wide_dtype))
         self.W_FC2 = torch.nn.Parameter(torch.empty((self.num_layers, self.hidden_dim, self.mlp_dim), dtype=self.wide_dtype))
 
+        # Stable insertion points for calibration and compression-aware training. Replacing an
+        # identity with a module that returns a same-shaped tensor preserves the attention layout.
+        self.key_transforms = torch.nn.ModuleList(torch.nn.Identity() for _ in range(self.num_layers))
+        self.value_transforms = torch.nn.ModuleList(torch.nn.Identity() for _ in range(self.num_layers))
+
         # GPT-2-style initialization: all weights ~ Normal(0, 0.02), with W_FC2 and W_O additionally scaled by 1/sqrt(2 * num_layers).
         @torch.no_grad()
         def init_normal (W, std):
@@ -72,6 +77,18 @@ class GPTModel(torch.nn.Module):
         # For causality, this means an upper triangular False matrix.
         self.register_buffer('attn_mask', tok_idxs[:, None] > tok_idxs[None, :], persistent=False)
 
+    def set_key_value_transforms(self, layer, *, key=None, value=None):
+        if layer < 0 or layer >= self.num_layers:
+            raise IndexError(f"Layer index {layer} is outside [0, {self.num_layers}).")
+        if key is not None:
+            if not isinstance(key, torch.nn.Module):
+                raise TypeError("key transform must be a torch.nn.Module")
+            self.key_transforms[layer] = key
+        if value is not None:
+            if not isinstance(value, torch.nn.Module):
+                raise TypeError("value transform must be a torch.nn.Module")
+            self.value_transforms[layer] = value
+
     def forward(self, inputs):
         assert inputs.ndim == 2, "For simplicity, we require inputs is a 2D tensor, shape (B, S)."
         seq_len = inputs.size(1)
@@ -93,6 +110,8 @@ class GPTModel(torch.nn.Module):
             Q = torch.einsum('HdD,BSD->HBSd', self.W_Q[layer, ...].to(nd), Z.to(nd))
             K = torch.einsum('HdD,BSD->HBSd', self.W_K[layer, ...].to(nd), Z.to(nd))
             V = torch.einsum('HdD,BSD->HBSd', self.W_V[layer, ...].to(nd), Z.to(nd))
+            K = self.key_transforms[layer](K)
+            V = self.value_transforms[layer](V)
             Z = torch.einsum('HBTd,HBSd->HBTS', K.repeat_interleave(self.num_heads // self.num_query_groups, dim=0), Q)
             Z = Z.div(math.sqrt(self.qk_dim))
             Z = Z.masked_fill(self.attn_mask[:seq_len, :seq_len], float('-inf'))
