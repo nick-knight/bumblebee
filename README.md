@@ -63,7 +63,7 @@ See `interactive-dp8.sh` and `batch-dp32.sh`.
 
 ## Development
 
-Testing: currently there is no automated testing. I manually test, from time to time, by running `python train.py` and declaring success when the loss looks like it's going down.
+Run the automated tests from this directory with `python -m pytest tests`.
 
 I use a pre-commit Git hook that calls ruff-check. To install this hook on your clone, run the following from the top-level directory:
 

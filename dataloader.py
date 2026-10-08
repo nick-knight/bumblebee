@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import torch
-import tiktoken
 
 
 class ByteTokenizer:
@@ -15,6 +14,8 @@ class ByteTokenizer:
 def get_tokenizer(name):
     if name == 'byte':
         return ByteTokenizer()
+    import tiktoken
+
     return tiktoken.encoding_for_model(name)
 
 def dataloader(dataset, tokenizer, batch_size, seq_len, device):
